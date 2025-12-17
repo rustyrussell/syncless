@@ -23,6 +23,22 @@ pub(crate) struct Record {
     pub file_data_offset: u64,
 }
 
+// No zero-length spans, no overlapping.
+fn debug_check_spans(spans: &BTreeMap<u64, Span>)
+{
+    let mut prev_end = None;
+
+    for (&off, span) in spans {
+        debug_assert!(span.len > 0);
+        let end = off + span.len;
+
+        if let Some(pe) = prev_end {
+            debug_assert!(off >= pe);
+        }
+        prev_end = Some(end);
+    }
+}
+
 // Read bytes, but seek back if it fails.  Return false if couldn't read all.
 fn read_bytes_fail_back(file: &mut File,
                         buf: &mut [u8],
@@ -98,8 +114,8 @@ pub(crate) fn write_record(file: &mut File,
     let offhdr = logical_offset.to_le_bytes();
     let len = data.len();
 
-    debug_assert!((len >> 24) == 0);
-
+    debug_assert!(len < MAX_RECORD_SIZE);
+    debug_assert!(MAX_RECORD_SIZE - 1 <= 0x00FF_FFFF);
     let lenhdr = [(len & 0xFF) as u8,
                   ((len >> 8) & 0xFF) as u8,
                   ((len >> 16) & 0xFF) as u8];
@@ -120,40 +136,35 @@ pub(crate) fn write_record(file: &mut File,
     Ok(data_off)
 }
 
+/// If a span overlaps logical_offset, split it in two.
+fn split_span(spans: &mut BTreeMap<u64, Span>, logical_offset: u64)
+{
+    if let Some((&offset, span)) = spans.range((Included(0), Excluded(logical_offset))).next_back() {
+        if offset + span.len > logical_offset {
+            let before_len = logical_offset - offset;
+            let newspan = Span { len: span.len - before_len,
+                                 file_data_offset: span.file_data_offset + before_len };
+            spans.insert(logical_offset, newspan);
+            spans.get_mut(&offset).unwrap().len = before_len;
+        }
+    }
+}
+
 /// Insert a record into our in-memory span map.
 pub(crate) fn add_record(spans: &mut BTreeMap<u64, Span>, 
                          logical_offset: u64,
                          len: u64,
                          file_data_offset: u64)
 {
-    // Do we partially overlap a span?  Trim it if so.
-    match spans.range((Included(0), Excluded(logical_offset))).next_back() {
-        None => {}
-        Some((&offset, span)) => {
-            if offset + span.len > logical_offset {
-                spans.get_mut(&offset).unwrap().len = logical_offset - offset;
-            }
-        }
-    }
+    // Do we partially overlap some spans?  Split if so.
+    split_span(spans, logical_offset);
+    split_span(spans, logical_offset + len);
 
-    // Collect overlaps
+    // Collect overlaps (can't delete during iteration).
     let overlaps: Vec<u64> = spans
         .range((Included(logical_offset), Excluded(logical_offset + len)))
         .map(|(&k, _)| k)
         .collect();
-
-    // May need to actually split last one: create new one here, remove below.
-    if let Some(&last) = overlaps.last() {
-        let span = spans.get(&last).unwrap();
-        if last + span.len > logical_offset + len {
-            let front_trim = logical_offset + len - last;
-            let span_tail = Span {
-                len: span.len - front_trim,
-                file_data_offset: span.file_data_offset + front_trim
-            };
-            spans.insert(logical_offset + len, span_tail);
-        }
-    }
 
     // Delete all.
     for k in overlaps {
@@ -162,4 +173,5 @@ pub(crate) fn add_record(spans: &mut BTreeMap<u64, Span>,
 
     // Insert new span.
     spans.insert(logical_offset, Span { len: len, file_data_offset: file_data_offset });
+    debug_check_spans(spans);
 }

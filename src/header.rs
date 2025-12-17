@@ -2,9 +2,9 @@
 //! Magic food (8 bytes):                "Syncless"
 //! Version (4 bytes, Little Endian):    Majorver (8 bits) Formatver (8 bits) Minorver (16 bits);
 //!
-//!                                      Majorver:  if not compatible, fail open.
-//!                                      Formatver: if not compatible, only allow read-only open.
-//!                                      Minorver:  ignore, informational only.
+//! Majorver: if not compatible, fail open.
+//! Formatver: if not compatible, only allow read-only open.
+//! Minorver:  ignore, informational only.
 use std::fs::File;
 use std::io::{Read, Write};
 use crate::Error;

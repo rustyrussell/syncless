@@ -98,28 +98,37 @@ impl Store {
     ///
     /// Return zeros past the logical size of the store (see size()),
     /// and an error on underlying I/O error.
-    pub fn read(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
-        let mut buf_off: u64 = 0;
-
+    pub fn read(&mut self, mut offset: u64, mut buf: &mut [u8]) -> Result<(), Error> {
         // Holes are zeros, so simply zero it out to start.
         buf.fill(0);
 
+        // End of previous span may overlap.
         if let Some((&off, span)) = self.spans.range((Included(0), Excluded(offset))).next_back() {
             if off + span.len > offset {
                 // FIXME: mmap
                 let bytes_before = offset - off;
                 let len = min(span.len - bytes_before, buf.len() as u64);
-                self.file.seek(SeekFrom::Start(off + bytes_before))?;
+                self.file.seek(SeekFrom::Start(span.file_data_offset + bytes_before))?;
                 self.file.read_exact(&mut buf[..len as usize])?;
-                buf_off += len;
+                offset += len;
+                buf = &mut buf[len as usize..];
             }
         }
 
-        for (&off, span) in self.spans.range((Included(offset + buf_off), Excluded(offset + buf.len() as u64))) {
-            let len = min(span.len, buf.len() as u64 - buf_off);
-            self.file.seek(SeekFrom::Start(off))?;
-            self.file.read_exact(&mut buf[buf_off as usize..buf_off as usize + len as usize])?;
-            buf_off += len;
+        for (&off, span) in self.spans.range((Included(offset), Excluded(offset + buf.len() as u64))) {
+            // Skip over any bytes not covered by span.
+            let bytes_until_span = off - offset;
+            if bytes_until_span != 0 {
+                offset += bytes_until_span;
+                buf = &mut buf[bytes_until_span as usize..];
+            }
+
+            // Read in span.
+            let len = min(span.len, buf.len() as u64);
+            self.file.seek(SeekFrom::Start(span.file_data_offset))?;
+            self.file.read_exact(&mut buf[..len as usize])?;
+            offset += len;
+            buf = &mut buf[len as usize..];
         }
         Ok(())
     }
@@ -147,4 +156,80 @@ impl Store {
         }
         Ok(())
     }
+}
+
+#[cfg(test)]
+
+#[test]
+fn empty_store_size_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+
+    let store = open(&path, OpenMode::WriteMayCreate).unwrap();
+    assert_eq!(store.size(), 0);
+}
+
+#[test]
+fn write_then_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+
+    let mut store = open(&path, OpenMode::WriteMayCreate).unwrap();
+
+    store.write(0, b"hello").unwrap();
+
+    let mut buf = [0u8; 5];
+    store.read(0, &mut buf).unwrap();
+
+    assert_eq!(&buf, b"hello");
+}
+
+#[test]
+fn overwrite_middle() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+
+    let mut store = open(&path, OpenMode::WriteMayCreate).unwrap();
+
+    store.write(0, b"abcdefgh").unwrap();
+    store.write(2, b"XYZ").unwrap();
+
+    let mut buf = [0u8; 8];
+    store.read(0, &mut buf).unwrap();
+
+    assert_eq!(&buf, b"abXYZfgh");
+}
+
+#[test]
+fn holes_are_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+
+    let mut store = open(&path, OpenMode::WriteMayCreate).unwrap();
+    store.write(10, b"hi").unwrap();
+
+    let mut buf = [0u8; 12];
+    store.read(0, &mut buf).unwrap();
+
+    assert_eq!(&buf[..10], &[0u8; 10]);
+    assert_eq!(&buf[10..12], b"hi");
+}
+
+#[test]
+fn replay_reconstructs_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+
+    {
+        let mut store = open(&path, OpenMode::WriteMayCreate).unwrap();
+        store.write(0, b"abc").unwrap();
+        store.write(5, b"xyz").unwrap();
+    }
+
+    let mut store = open(&path, OpenMode::WriteMustExist).unwrap();
+
+    let mut buf = [0u8; 8];
+    store.read(0, &mut buf).unwrap();
+
+    assert_eq!(&buf, b"abc\0\0xyz");
 }

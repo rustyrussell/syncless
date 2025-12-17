@@ -136,9 +136,15 @@ impl Store {
     /// # Errors
     ///
     /// Returns an error on underlying I/O problems (probably out of disk space).
-    pub fn write(&mut self, offset: u64, buf: &[u8]) -> Result<(), Error> {
-        let data_off = record::write_record(&mut self.file, offset, buf, &mut self.file_size)?;
-        record::add_record(&mut self.spans, offset, buf.len() as u64, data_off);
+    pub fn write(&mut self, mut offset: u64, mut buf: &[u8]) -> Result<(), Error> {
+        while !buf.is_empty() {
+            let chunk = &buf[..min(buf.len(), record::MAX_RECORD_SIZE)];
+
+            let data_off = record::write_record(&mut self.file, offset, chunk, &mut self.file_size)?;
+            record::add_record(&mut self.spans, offset, chunk.len() as u64, data_off);
+            buf = &buf[chunk.len()..];
+            offset += chunk.len() as u64;
+        }
         Ok(())
     }
 }

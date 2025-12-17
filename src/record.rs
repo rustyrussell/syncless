@@ -1,15 +1,17 @@
 //! Each write appends an ondisk record has a header, and a tailer.
 //! [logical_offset: le64]
-//! [length: le64]
+//! [length: le24]
 //! [data...: length]
 //! [hash: le64] (covers offset, length, and data)
-use std::io::{Seek, SeekFrom, Read, Write};
+use std::io::{Seek, Read, Write};
 use std::fs::File;
 use crc64fast;
 use std::ops::Bound::*;
 use std::collections::BTreeMap;
 use crate::Error;
 use crate::store::Span;
+
+pub(crate) const MAX_RECORD_SIZE: usize = 1 << 24;
 
 pub(crate) struct RecordHeader {
     pub logical_offset: u64,
@@ -40,32 +42,18 @@ fn read_bytes_fail_back(file: &mut File,
 
 pub(crate) fn read_next_record(file: &mut File, file_offset: &mut u64) -> Result<Option<Record>, Error>
 {
-    let mut hdrbytes = [0u8; 8 + 8];
+    let mut hdrbytes = [0u8; 8 + 3];
     let mut total_read: u64 = 0;
 
     if !read_bytes_fail_back(file, &mut hdrbytes, &mut total_read)? {
         return Ok(None);
     }
 
+    let len24 = (hdrbytes[8] as u32) | ((hdrbytes[9] as u32) << 8) | ((hdrbytes[10] as u32) << 16);
     let rhdr = RecordHeader {
         logical_offset: u64::from_le_bytes(hdrbytes[..8].try_into().unwrap()),
-        length: u64::from_le_bytes(hdrbytes[8..].try_into().unwrap()),
+        length: len24 as u64,
     };
-
-    // If we're about to allocate more than 16MB, check that the file
-    // is indeed this big first!
-    if rhdr.length > 16*1024*1024 {
-        // Experimental file.stream_len() would help here!
-        // See https://github.com/rust-lang/rust/issues/59359
-        let cur = file.stream_position()?;
-        let eof = file.seek(SeekFrom::End(0))?;
-        let remaining_len = eof - cur;
-        if remaining_len < rhdr.length {
-            file.seek_relative(-(total_read as i64))?;
-            return Ok(None);
-        }
-        file.seek(SeekFrom::Start(cur))?;
-    }
 
     let rec = Record {
         hdr: rhdr,
@@ -97,7 +85,7 @@ pub(crate) fn read_next_record(file: &mut File, file_offset: &mut u64) -> Result
     return Ok(Some(rec));
 }
 
-/// Appends a record to the end of the store.
+/// Appends a record to the end of the store (must be < 16MB!)
 /// 
 /// The file cursor must be positioned at the end of the valid log.
 /// Atomicity is provided by the trailer checksum; durability is not guaranteed.
@@ -108,7 +96,13 @@ pub(crate) fn write_record(file: &mut File,
                            -> Result<u64, Error>
 {
     let offhdr = logical_offset.to_le_bytes();
-    let lenhdr = (data.len() as u64).to_le_bytes();
+    let len = data.len();
+
+    debug_assert!((len >> 24) == 0);
+
+    let lenhdr = [(len & 0xFF) as u8,
+                  ((len >> 8) & 0xFF) as u8,
+                  ((len >> 16) & 0xFF) as u8];
 
     file.write_all(&offhdr)?;
     file.write_all(&lenhdr)?;

@@ -57,7 +57,7 @@ pub fn open<P: AsRef<Path>>(
     // Special case: empty file, we write header.
     if store.file.metadata()?.len() == 0 && !matches!(mode, OpenMode::ReadOnly) {
         store.file_size = header::write_header(&mut store.file)?;
-        // FIXME: fdatasync!
+        store.file.sync_all()?;
         return Ok(store);
     }
 

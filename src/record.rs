@@ -3,7 +3,7 @@
 //! [length: le24]
 //! [data...: length]
 //! [hash: le64] (covers offset, length, and data)
-use std::io::{Seek, Read, Write};
+use std::io::{Seek, SeekFrom, Read, Write};
 use std::fs::File;
 use crc64fast;
 use std::ops::Bound::*;
@@ -12,6 +12,7 @@ use crate::Error;
 use crate::store::Span;
 
 pub(crate) const MAX_RECORD_SIZE: usize = 1 << 24;
+const RECORD_HDR_SIZE: usize = 8 + 3;
 
 pub(crate) struct RecordHeader {
     pub logical_offset: u64,
@@ -56,9 +57,25 @@ fn read_bytes_fail_back(file: &mut File,
     return Ok(false);
 }
 
+pub(crate) fn validate(file: &mut File,
+                       data_offset: u64,
+                       data_length: usize) -> Result<bool, Error>
+{
+    let mut bytes = vec![0u8; RECORD_HDR_SIZE + data_length + 8];
+
+    file.seek(SeekFrom::Start(data_offset - RECORD_HDR_SIZE as u64))?;
+    file.read_exact(&mut bytes)?;
+
+    let mut d = crc64fast::Digest::new();
+    d.write(&bytes[..RECORD_HDR_SIZE + data_length]);
+
+    let csum_start = bytes.len() - 8;
+    Ok(d.sum64() == u64::from_le_bytes(bytes[csum_start..csum_start + 8].try_into().unwrap()))
+}
+
 pub(crate) fn read_next_record(file: &mut File, file_offset: &mut u64) -> Result<Option<Record>, Error>
 {
-    let mut hdrbytes = [0u8; 8 + 3];
+    let mut hdrbytes = [0u8; RECORD_HDR_SIZE];
     let mut total_read: u64 = 0;
 
     if !read_bytes_fail_back(file, &mut hdrbytes, &mut total_read)? {
@@ -143,7 +160,8 @@ fn split_span(spans: &mut BTreeMap<u64, Span>, logical_offset: u64)
         if offset + span.len > logical_offset {
             let before_len = logical_offset - offset;
             let newspan = Span { len: span.len - before_len,
-                                 file_data_offset: span.file_data_offset + before_len };
+                                 file_data_offset: span.file_data_offset + before_len,
+                                 validated: span.validated };
             spans.insert(logical_offset, newspan);
             spans.get_mut(&offset).unwrap().len = before_len;
         }
@@ -154,7 +172,8 @@ fn split_span(spans: &mut BTreeMap<u64, Span>, logical_offset: u64)
 pub(crate) fn add_record(spans: &mut BTreeMap<u64, Span>, 
                          logical_offset: u64,
                          len: u64,
-                         file_data_offset: u64)
+                         file_data_offset: u64,
+                         validated: bool)
 {
     // Do we partially overlap some spans?  Split if so.
     split_span(spans, logical_offset);
@@ -172,6 +191,9 @@ pub(crate) fn add_record(spans: &mut BTreeMap<u64, Span>,
     }
 
     // Insert new span.
-    spans.insert(logical_offset, Span { len: len, file_data_offset: file_data_offset });
+    spans.insert(logical_offset, Span { len: len,
+                                        file_data_offset: file_data_offset,
+                                        validated: validated,
+    });
     debug_check_spans(spans);
 }

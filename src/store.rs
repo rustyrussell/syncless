@@ -20,8 +20,13 @@ pub struct StoreBase {
 }
 
 pub(crate) struct Span {
+    /// How long is the data in this span (in practice, less than MAX_RECORD_SIZE).
     pub len: u64,
+    /// Where the physical file is the span data (i.e. after header).
     pub file_data_offset: u64,
+    /// Did we freshly write this span?  If so, ZFS on Ubuntu (at least) may fart back zeroes
+    /// at us: we need to recheck this and fdatasync if we see this.  Thanks Obama!
+    pub validated: bool,
 }
 
 /// Parse header of new file, load up records.
@@ -37,7 +42,7 @@ fn read_newfile(base: &mut StoreBase, compatible: fn(&header::HeaderVer) -> bool
         record::add_record(&mut base.spans,
                            record.hdr.logical_offset,
                            record.hdr.length,
-                           record.file_data_offset);
+                           record.file_data_offset, true);
         base.logical_size = max(base.logical_size, record.hdr.logical_offset + record.hdr.length);
     }
     Ok(())
@@ -69,7 +74,7 @@ pub fn open_readonly<P: AsRef<Path>>(
     };
 
     read_newfile(&mut base, header::HeaderVer::is_read_compatible)?;
-    Ok(Store {base, _mode: PhantomData })
+    Ok(Store {base, writable: false, _mode: PhantomData })
 }
 
 /// Opens an existing syncless store for reading and writing.
@@ -112,15 +117,60 @@ pub fn open<P: AsRef<Path>>(
     } else {
         read_newfile(&mut base, header::HeaderVer::is_write_compatible)?;
     }
-    Ok(Store {base, _mode: PhantomData })
+    Ok(Store {base, writable: true, _mode: PhantomData })
 }
 
-impl<M> Store<M> {
+fn validate_record_with_retry(
+    file: &mut File,
+    file_data_offset: u64,
+    length: u64,
+) -> Result<(), Error> {
+    if record::validate(file, file_data_offset, length as usize)? {
+        return Ok(());
+    }
+
+    file.sync_data()?;
+
+    if record::validate(file, file_data_offset, length as usize)? {
+        return Ok(());
+    }
+
+    Err(Error::CorruptRecord)
+}
+
+impl<M> Store<M>
+{
     /// Returns the logical size of the store in bytes.
     ///
     /// Can't read past this, can write past it (which, if successful, may
     /// increase future logical size).
     pub fn size(&self) -> u64 { self.base.logical_size }
+
+    /// Validate any spans in this range not already validated.
+    pub fn validate_all(&mut self, start: u64, end: u64) -> Result<(), Error> {
+        let to_validate: Vec<(u64, u64, u64)> = self.base.spans
+            .range((Included(start), Excluded(end)))
+            .filter_map(|(&off, span)| {
+                if span.validated {
+                    None
+                } else {
+                    Some((off, span.file_data_offset, span.len))
+                }
+            })
+            .collect();
+
+        // Validate them all.
+        for &(_, file_data_offset, length) in &to_validate {
+            validate_record_with_retry(&mut self.base.file, file_data_offset, length)?;
+        }
+
+        // Set them all valid.
+        for &(off, _, _) in &to_validate {
+            let span = self.base.spans.get_mut(&off).unwrap();
+            span.validated = true;
+        }
+        Ok(())
+    }
 
     /// Reads `buf.len()` bytes starting at `offset`.
     ///
@@ -136,11 +186,22 @@ impl<M> Store<M> {
         // Holes are zeros, so simply zero it out to start.
         buf.fill(0);
 
+        // Find the previous span offset (or 0)
+        let prev = self.base.spans
+            .range((Included(0), Excluded(offset)))
+            .next_back()
+            .map(|(&off, _)| off)
+            .unwrap_or(0);
+
+        if self.writable {
+            self.validate_all(prev, offset + buf.len() as u64)?
+        }
+
         // End of previous span may overlap.
-        if let Some((&off, span)) = self.base.spans.range((Included(0), Excluded(offset))).next_back() {
-            if off + span.len > offset {
+        if let Some(span) = self.base.spans.get(&prev) {
+            if prev + span.len > offset {
                 // FIXME: mmap
-                let bytes_before = offset - off;
+                let bytes_before = offset - prev;
                 let len = min(span.len - bytes_before, buf.len() as u64);
                 self.base.file.seek(SeekFrom::Start(span.file_data_offset + bytes_before))?;
                 self.base.file.read_exact(&mut buf[..len as usize])?;
@@ -187,7 +248,7 @@ impl Store<Writable> {
             let chunk = &buf[..min(buf.len(), record::MAX_RECORD_SIZE)];
 
             let data_off = record::write_record(&mut self.base.file, offset, chunk, &mut self.base.file_size)?;
-            record::add_record(&mut self.base.spans, offset, chunk.len() as u64, data_off);
+            record::add_record(&mut self.base.spans, offset, chunk.len() as u64, data_off, false);
             buf = &buf[chunk.len()..];
             offset += chunk.len() as u64;
         }
@@ -195,9 +256,13 @@ impl Store<Writable> {
     }
 
     /// Convert this writable store into a readonly one.
-    pub fn into_readonly(self) -> Result<Store<ReadOnly>, Error> {
+    pub fn into_readonly(mut self) -> Result<Store<ReadOnly>, Error> {
+        // Before we make it readonly, make sure all spans are validated!
+        self.validate_all(0, self.size())?;
+
         Ok(Store {
             base: self.base,
+            writable: false,
             _mode: PhantomData,
         })
     }

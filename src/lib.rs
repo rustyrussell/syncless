@@ -12,15 +12,18 @@ mod header;
 mod record;
 mod store;
 
-/// Errors from open
+/// Errors from our functions.
 #[derive(Debug)]
 pub enum Error {
     /// Underlying filesystem issue (ENOENT, ENOSPC, etc).
     Io(std::io::Error),
-    /// Not a file created by Syncless.
+    /// Open: not a file created by Syncless.
     NotSyncless,
-    /// A future version of Syncless, which says we're not compatible.
+    /// Open: a future version of Syncless, which says we're not compatible.
     UnsupportedVersion,
+    /// Read: we just wrote a record, and it wasn't valid when we read it back.
+    /// This should not happen.
+    CorruptRecord,
 }
 
 impl From<std::io::Error> for Error {
@@ -32,6 +35,7 @@ impl From<std::io::Error> for Error {
 /// Store comes in two flavors: ReadOnly and Writable.
 pub struct Store<M> {
     base: StoreBase,
+    writable: bool,
     _mode: std::marker::PhantomData<M>,
 }
 

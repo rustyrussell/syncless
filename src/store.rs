@@ -193,6 +193,14 @@ impl Store<Writable> {
         }
         Ok(())
     }
+
+    /// Convert this writable store into a readonly one.
+    pub fn into_readonly(self) -> Result<Store<ReadOnly>, Error> {
+        Ok(Store {
+            base: self.base,
+            _mode: PhantomData,
+        })
+    }
 }
 
 #[cfg(test)]

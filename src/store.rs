@@ -4,13 +4,15 @@ use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Bound::*;
 use std::cmp::{min, max};
+use std::marker::PhantomData;
 use crate::Error;
 use crate::header;
 use crate::record;
-use crate::OpenMode;
+use crate::Store;
+use crate::{ReadOnly, Writable, WriteOpenMode};
 
 /// An open Syncless store.
-pub struct Store {
+pub struct StoreBase {
     file: File,
     spans: BTreeMap<u64, Span>,
     logical_size: u64,
@@ -22,7 +24,26 @@ pub(crate) struct Span {
     pub file_data_offset: u64,
 }
 
-/// Opens an existing syncless store or creates a new one.
+/// Parse header of new file, load up records.
+fn read_newfile(base: &mut StoreBase, compatible: fn(&header::HeaderVer) -> bool) -> Result<(), Error>
+{
+    let hver = header::read_header(&mut base.file, &mut base.file_size)?;
+
+    if !compatible(&hver) {
+        return Err(Error::UnsupportedVersion);
+    }
+
+    while let Some(record) = record::read_next_record(&mut base.file, &mut base.file_size)? {
+        record::add_record(&mut base.spans,
+                           record.hdr.logical_offset,
+                           record.hdr.length,
+                           record.file_data_offset);
+        base.logical_size = max(base.logical_size, record.hdr.logical_offset + record.hdr.length);
+    }
+    Ok(())
+}
+
+/// Opens an existing syncless store readonly.
 ///
 /// On success, the returned [`Store`] represents a logically consistent
 /// view reconstructed from the on-disk log.
@@ -32,22 +53,52 @@ pub(crate) struct Span {
 /// Returns an error if the file cannot be opened (using the
 /// underlying OS error), is not a valid syncless store, or is a
 /// future incompatible version.
-pub fn open<P: AsRef<Path>>(
+pub fn open_readonly<P: AsRef<Path>>(
     path: P,
-    mode: OpenMode,
-) -> Result<Store, Error> {
+) -> Result<Store<ReadOnly>, Error> {
     let mut oo = std::fs::OpenOptions::new();
     oo.read(true);
 
+    let file = oo.open(path)?;
+
+    let mut base = StoreBase {
+        file: file,
+        spans: BTreeMap::new(),
+        logical_size: 0,
+        file_size: 0,
+    };
+
+    read_newfile(&mut base, header::HeaderVer::is_read_compatible)?;
+    Ok(Store {base, _mode: PhantomData })
+}
+
+/// Opens an existing syncless store for reading and writing.
+///
+/// On success, the returned [`Store`] represents a logically consistent
+/// view reconstructed from the on-disk log.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened for writing (using the
+/// underlying OS error), is not a valid syncless store, or is a
+/// future incompatible version.
+pub fn open<P: AsRef<Path>>(
+    path: P,
+    mode: WriteOpenMode,
+) -> Result<Store<Writable>, Error> {
+    let mut oo = std::fs::OpenOptions::new();
+    oo.read(true);
+    oo.write(true);
+
     match mode {
-        OpenMode::ReadOnly => {}
-        OpenMode::WriteMustExist => { oo.write(true); }
-        OpenMode::WriteMayCreate => { oo.write(true); oo.create(true); }
+        WriteOpenMode::MustExist => { oo.create(false); }
+        WriteOpenMode::MustNotExist => { oo.create_new(true); }
+        WriteOpenMode::MayExist => { oo.create(true); }
     }
 
     let file = oo.open(path)?;
 
-    let mut store = Store {
+    let mut base = StoreBase {
         file: file,
         spans: BTreeMap::new(),
         logical_size: 0,
@@ -55,38 +106,21 @@ pub fn open<P: AsRef<Path>>(
     };
 
     // Special case: empty file, we write header.
-    if store.file.metadata()?.len() == 0 && !matches!(mode, OpenMode::ReadOnly) {
-        store.file_size = header::write_header(&mut store.file)?;
-        store.file.sync_all()?;
-        return Ok(store);
+    if base.file.metadata()?.len() == 0 {
+        base.file_size = header::write_header(&mut base.file)?;
+        base.file.sync_all()?;
+    } else {
+        read_newfile(&mut base, header::HeaderVer::is_write_compatible)?;
     }
-
-    let hver = header::read_header(&mut store.file, &mut store.file_size)?;
-
-    if !hver.is_read_compatible() {
-        return Err(Error::UnsupportedVersion);
-    }
-    
-    if !matches!(mode, OpenMode::ReadOnly) && !hver.is_write_compatible() {
-        return Err(Error::UnsupportedVersion);
-    }
-
-    while let Some(record) = record::read_next_record(&mut store.file, &mut store.file_size)? {
-        record::add_record(&mut store.spans,
-                           record.hdr.logical_offset,
-                           record.hdr.length,
-                           record.file_data_offset);
-        store.logical_size = max(store.logical_size, record.hdr.logical_offset + record.hdr.length);
-    }
-    Ok(store)
+    Ok(Store {base, _mode: PhantomData })
 }
 
-impl Store {
+impl<M> Store<M> {
     /// Returns the logical size of the store in bytes.
     ///
     /// Can't read past this, can write past it (which, if successful, may
     /// increase future logical size).
-    pub fn size(&self) -> u64 { self.logical_size }
+    pub fn size(&self) -> u64 { self.base.logical_size }
 
     /// Reads `buf.len()` bytes starting at `offset`.
     ///
@@ -103,19 +137,19 @@ impl Store {
         buf.fill(0);
 
         // End of previous span may overlap.
-        if let Some((&off, span)) = self.spans.range((Included(0), Excluded(offset))).next_back() {
+        if let Some((&off, span)) = self.base.spans.range((Included(0), Excluded(offset))).next_back() {
             if off + span.len > offset {
                 // FIXME: mmap
                 let bytes_before = offset - off;
                 let len = min(span.len - bytes_before, buf.len() as u64);
-                self.file.seek(SeekFrom::Start(span.file_data_offset + bytes_before))?;
-                self.file.read_exact(&mut buf[..len as usize])?;
+                self.base.file.seek(SeekFrom::Start(span.file_data_offset + bytes_before))?;
+                self.base.file.read_exact(&mut buf[..len as usize])?;
                 offset += len;
                 buf = &mut buf[len as usize..];
             }
         }
 
-        for (&off, span) in self.spans.range((Included(offset), Excluded(offset + buf.len() as u64))) {
+        for (&off, span) in self.base.spans.range((Included(offset), Excluded(offset + buf.len() as u64))) {
             // Skip over any bytes not covered by span.
             let bytes_until_span = off - offset;
             if bytes_until_span != 0 {
@@ -125,14 +159,17 @@ impl Store {
 
             // Read in span.
             let len = min(span.len, buf.len() as u64);
-            self.file.seek(SeekFrom::Start(span.file_data_offset))?;
-            self.file.read_exact(&mut buf[..len as usize])?;
+            self.base.file.seek(SeekFrom::Start(span.file_data_offset))?;
+            self.base.file.read_exact(&mut buf[..len as usize])?;
             offset += len;
             buf = &mut buf[len as usize..];
         }
         Ok(())
     }
+}
 
+
+impl Store<Writable> {
     /// Writes `buf.len()` bytes starting at `offset`.
     ///
     /// You can write anywhere, but if you create holes they will be
@@ -149,8 +186,8 @@ impl Store {
         while !buf.is_empty() {
             let chunk = &buf[..min(buf.len(), record::MAX_RECORD_SIZE)];
 
-            let data_off = record::write_record(&mut self.file, offset, chunk, &mut self.file_size)?;
-            record::add_record(&mut self.spans, offset, chunk.len() as u64, data_off);
+            let data_off = record::write_record(&mut self.base.file, offset, chunk, &mut self.base.file_size)?;
+            record::add_record(&mut self.base.spans, offset, chunk.len() as u64, data_off);
             buf = &buf[chunk.len()..];
             offset += chunk.len() as u64;
         }
@@ -165,7 +202,7 @@ fn empty_store_size_zero() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s");
 
-    let store = open(&path, OpenMode::WriteMayCreate).unwrap();
+    let store = open(&path, WriteOpenMode::MayExist).unwrap();
     assert_eq!(store.size(), 0);
 }
 
@@ -174,7 +211,7 @@ fn write_then_read() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s");
 
-    let mut store = open(&path, OpenMode::WriteMayCreate).unwrap();
+    let mut store = open(&path, WriteOpenMode::MayExist).unwrap();
 
     store.write(0, b"hello").unwrap();
 
@@ -189,7 +226,7 @@ fn overwrite_middle() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s");
 
-    let mut store = open(&path, OpenMode::WriteMayCreate).unwrap();
+    let mut store = open(&path, WriteOpenMode::MayExist).unwrap();
 
     store.write(0, b"abcdefgh").unwrap();
     store.write(2, b"XYZ").unwrap();
@@ -205,7 +242,7 @@ fn holes_are_zero() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s");
 
-    let mut store = open(&path, OpenMode::WriteMayCreate).unwrap();
+    let mut store = open(&path, WriteOpenMode::MayExist).unwrap();
     store.write(10, b"hi").unwrap();
 
     let mut buf = [0u8; 12];
@@ -221,12 +258,12 @@ fn replay_reconstructs_state() {
     let path = dir.path().join("s");
 
     {
-        let mut store = open(&path, OpenMode::WriteMayCreate).unwrap();
+        let mut store = open(&path, WriteOpenMode::MayExist).unwrap();
         store.write(0, b"abc").unwrap();
         store.write(5, b"xyz").unwrap();
     }
 
-    let mut store = open(&path, OpenMode::WriteMustExist).unwrap();
+    let mut store = open(&path, WriteOpenMode::MustExist).unwrap();
 
     let mut buf = [0u8; 8];
     store.read(0, &mut buf).unwrap();

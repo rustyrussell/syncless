@@ -2,12 +2,12 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use tempfile::tempdir;
 
-use syncless::{open, OpenMode};
+use syncless::{open_readonly, open, WriteOpenMode};
 
 const ALL_WRITES: usize = 3;
 
 fn write_base_file(path: &std::path::Path, num_writes: usize) {
-    let mut store = open(path, OpenMode::WriteMayCreate).unwrap();
+    let mut store = open(path, WriteOpenMode::MayExist).unwrap();
 
     const WRITES: &[(u64, &[u8])] = &[
         (1, b"AB"),
@@ -21,7 +21,7 @@ fn write_base_file(path: &std::path::Path, num_writes: usize) {
 }
 
 fn read_contents(path: &std::path::Path) -> Vec<u8> {
-    let mut store = open(path, OpenMode::ReadOnly).unwrap();
+    let mut store = open_readonly(path).unwrap();
     let mut buf = vec![0u8; store.size() as usize];
     store.read(0, &mut buf).unwrap();
     buf

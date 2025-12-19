@@ -29,15 +29,27 @@ impl From<std::io::Error> for Error {
     }
 }
 
-/// How to open the Syncless store file:
-pub enum OpenMode {
-    /// Must exist, must be a Syncless store file, file may be unwritable, will not use Store::write().
-    ReadOnly,
-    /// Must exist, must be empty or a Syncless store file, must be writable, can use Store::write().
-    WriteMustExist,
-    /// Must be a Syncless store file or will be created, must be writable, can use Store::write().
-    WriteMayCreate,
+/// Store comes in two flavors: ReadOnly and Writable.
+pub struct Store<M> {
+    base: StoreBase,
+    _mode: std::marker::PhantomData<M>,
 }
 
+/// Phantom data to make Store<Readonly>
+pub struct ReadOnly;
+/// Phantom data to make Store<Writable>
+pub struct Writable;
+
+/// How to open the Syncless store file:
+pub enum WriteOpenMode {
+    /// Must exist, must be a Syncless store file.
+    MustExist,
+    /// Must not exist.
+    MustNotExist,
+    /// Must not exist or be a Syncless store file.
+    MayExist,
+}
+
+pub use store::open_readonly;
 pub use store::open;
-pub use store::Store;
+pub use store::StoreBase;

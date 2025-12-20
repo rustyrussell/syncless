@@ -26,6 +26,35 @@
 //! - Durability (recent writes may be lost)
 //! - Isolation (single writer assumed)
 //! - Multi-process coordination
+//!
+//! ## Example: atomically storing a JSON file
+//!
+//! This saves a JSON blob (perhaps your program's config?) using syncless
+//! so it either gets the old or new one, never a corrupted version.
+//! In practice you would probably keep the Store<Writable> object around,
+//! as reloading it can be expensive if it has many changes.
+//!
+//! ```no_run
+//! use syncless::{open, Store, Writable, Error};
+//!
+//! pub fn save_config(
+//!     store: &mut Store<syncless::Writable>,
+//!     json: &str,
+//! ) -> Result<(), Error> {
+//!     store.write(0, json.as_bytes())
+//! }
+//!
+//! pub fn load_config(
+//!     store: &mut Store<syncless::ReadOnly>
+//! ) -> Result<String, Error> {
+//!     let mut buf = vec![0u8; store.size() as usize];
+//!
+//!     store.read(0, &mut buf)?;
+//!     let s = std::str::from_utf8(&buf)
+//!         .map_err(|e| Error::CorruptRecord)?;
+//!     Ok(s.to_owned())
+//! }
+//! ```
 #![deny(warnings)]
 #![deny(missing_docs)]
 #![forbid(unsafe_op_in_unsafe_fn)]

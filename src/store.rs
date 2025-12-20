@@ -12,7 +12,7 @@ use crate::Store;
 use crate::{ReadOnly, Writable, WriteOpenMode};
 
 /// An open Syncless store.
-pub struct StoreBase {
+pub(crate) struct StoreBase {
     file: File,
     spans: BTreeMap<u64, Span>,
     logical_size: u64,
@@ -142,8 +142,8 @@ impl<M> Store<M>
 {
     /// Returns the logical size of the store in bytes.
     ///
-    /// Can't read past this, can write past it (which, if successful, may
-    /// increase future logical size).
+    /// Reading past this gives zeros.  Writing past this successfully is
+    /// the only way to increase its value.
     pub fn size(&self) -> u64 { self.base.logical_size }
 
     /// Get offset of prior record (or 0)
@@ -187,14 +187,13 @@ impl<M> Store<M>
 
     /// Reads `buf.len()` bytes starting at `offset`.
     ///
-    /// The read is performed against the reconstructed logical view
-    /// of the store.  If there's a hole (created by a write past the
-    /// prior end of file) it will read as all zeros.
+    /// The read is performed against the reconstructed logical view of the
+    /// store.  If there's a hole, or past EOF, it will read as all zeros.
     ///
     /// # Errors
     ///
-    /// Return zeros past the logical size of the store (see size()),
-    /// and an error on underlying I/O error.
+    /// Return zeros past the logical size of the store (see size()), and an
+    /// error on underlying I/O error.
     pub fn read(&mut self, mut offset: u64, mut buf: &mut [u8]) -> Result<(), Error> {
         // Holes are zeros, so simply zero it out to start.
         buf.fill(0);

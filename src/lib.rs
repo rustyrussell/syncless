@@ -60,9 +60,9 @@ pub struct Store<M> {
     _mode: std::marker::PhantomData<M>,
 }
 
-/// Phantom data to make Store<Readonly>
+/// Phantom data to make a Readonly store
 pub struct ReadOnly;
-/// Phantom data to make Store<Writable>
+/// Phantom data to make a Writable store
 pub struct Writable;
 
 /// How to open the Syncless store file:
@@ -77,4 +77,4 @@ pub enum WriteOpenMode {
 
 pub use store::open_readonly;
 pub use store::open;
-pub use store::StoreBase;
+use store::StoreBase;

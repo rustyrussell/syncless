@@ -7,7 +7,7 @@
 //! requirements are overkill for these (and stressful on the entire system).
 //!
 //! Once `syncless` has opened a file (except for hardware errors or bugs)
-//! writes are **atomic(* and **consistently ordered**: if you see a write you
+//! writes are **atomic** and **consistently ordered**: if you see a write you
 //! will see all of it, and all prior writes.
 //!
 //! Writes are **not isolated** (a single reader/writer is assumed) and **not

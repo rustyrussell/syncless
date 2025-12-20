@@ -7,7 +7,7 @@ documentation = "https://docs.rs/syncless"
 readme = "README.md"
 keywords = ["storage", "log", "crash-consistent"]
 categories = ["filesystem", "database-implementations"]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 
 [dependencies]

@@ -1,5 +1,12 @@
 [package]
 name = "syncless"
+license = "MIT"
+description = "ordered, atomic storage without durability guarantees"
+repository = "https://github.com/rustyrussell/syncless"
+documentation = "https://docs.rs/syncless"
+readme = "README.md"
+keywords = ["storage", "log", "crash-consistent"]
+categories = ["filesystem", "database-implementations"]
 version = "0.1.0"
 edition = "2024"
 

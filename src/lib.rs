@@ -1,10 +1,31 @@
 //! syncless: ordered, atomic storage without durability guarantees.
 //!
-//! Many times you don't want to pay the cost of continuous fsyncs,
-//! and are ok with losing the latest updates if an OS crash/power
-//! outage were to happen and the user is unlucky BUT it's not OK to
-//! corrupt older data.  Think of cases like "browser bookmarks" or
-//! "history": synchronous requirements are overkill for these.
+//! Many times you don't want to pay the cost of continuous fsyncs, and are ok
+//! with losing the latest updates if an OS crash/power outage were to happen
+//! and the user is unlucky - but it's **not acceptable** to corrupt older
+//! data.  Think of cases like "browser bookmarks" or "history": synchronous
+//! requirements are overkill for these (and stressful on the entire system).
+//!
+//! Once `syncless` has opened a file (except for hardware errors or bugs)
+//! writes are **atomic(* and **consistently ordered**: if you see a write you
+//! will see all of it, and all prior writes.
+//!
+//! Writes are **not isolated** (a single reader/writer is assumed) and **not
+//! durable**: data may remain buffered in memory and be lost on crash or
+//! power failure.  However, crash recovery will never expose torn writes or
+//! corrupt earlier data.
+//!
+//! ## Guarantees
+//!
+//! - Atomic visibility of individual writes
+//! - Ordered visibility of writes
+//! - Crash-safe recovery of previously visible data
+//!
+//! ## Non-guarantees
+//!
+//! - Durability (recent writes may be lost)
+//! - Isolation (single writer assumed)
+//! - Multi-process coordination
 #![deny(warnings)]
 #![deny(missing_docs)]
 #![forbid(unsafe_op_in_unsafe_fn)]

@@ -159,6 +159,9 @@ fn split_span(spans: &mut BTreeMap<u64, Span>, logical_offset: u64)
     if let Some((&offset, span)) = spans.range((Included(0), Excluded(logical_offset))).next_back() {
         if offset + span.len > logical_offset {
             let before_len = logical_offset - offset;
+            // We cannot validate spans after splitting, since they no longer correspond to
+            // the record on disk.  So caller must have done this!
+            assert!(span.validated);
             let newspan = Span { len: span.len - before_len,
                                  file_data_offset: span.file_data_offset + before_len,
                                  validated: span.validated };

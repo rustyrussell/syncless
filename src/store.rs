@@ -146,8 +146,21 @@ impl<M> Store<M>
     /// increase future logical size).
     pub fn size(&self) -> u64 { self.base.logical_size }
 
+    /// Get offset of prior record (or 0)
+    fn prev_offset(&self, offset: u64) -> u64 {
+        self.base.spans
+            .range((Included(0), Excluded(offset)))
+            .next_back()
+            .map(|(&off, _)| off)
+            .unwrap_or(0)
+    }
+
     /// Validate any spans in this range not already validated.
-    pub fn validate_all(&mut self, start: u64, end: u64) -> Result<(), Error> {
+    fn validate_range(&mut self, start: u64, end: u64) -> Result<(), Error> {
+        if !self.writable {
+            return Ok(());
+        }
+
         let to_validate: Vec<(u64, u64, u64)> = self.base.spans
             .range((Included(start), Excluded(end)))
             .filter_map(|(&off, span)| {
@@ -186,16 +199,8 @@ impl<M> Store<M>
         // Holes are zeros, so simply zero it out to start.
         buf.fill(0);
 
-        // Find the previous span offset (or 0)
-        let prev = self.base.spans
-            .range((Included(0), Excluded(offset)))
-            .next_back()
-            .map(|(&off, _)| off)
-            .unwrap_or(0);
-
-        if self.writable {
-            self.validate_all(prev, offset + buf.len() as u64)?
-        }
+        let prev = self.prev_offset(offset);
+        self.validate_range(prev, offset + buf.len() as u64)?;
 
         // End of previous span may overlap.
         if let Some(span) = self.base.spans.get(&prev) {
@@ -244,6 +249,9 @@ impl Store<Writable> {
     ///
     /// Returns an error on underlying I/O problems (probably out of disk space).
     pub fn write(&mut self, mut offset: u64, mut buf: &[u8]) -> Result<(), Error> {
+        // Validate anything we're going to overwrite.
+        self.validate_range(self.prev_offset(offset), offset + buf.len() as u64)?;
+
         while !buf.is_empty() {
             let chunk = &buf[..min(buf.len(), record::MAX_RECORD_SIZE)];
 
@@ -258,7 +266,7 @@ impl Store<Writable> {
     /// Convert this writable store into a readonly one.
     pub fn into_readonly(mut self) -> Result<Store<ReadOnly>, Error> {
         // Before we make it readonly, make sure all spans are validated!
-        self.validate_all(0, self.size())?;
+        self.validate_range(0, self.size())?;
 
         Ok(Store {
             base: self.base,

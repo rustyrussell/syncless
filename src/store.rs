@@ -3,7 +3,7 @@ use std::path::Path;
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Bound::*;
-use std::cmp::{min, max};
+use std::cmp::min;
 use std::marker::PhantomData;
 use crate::Error;
 use crate::header;
@@ -15,7 +15,6 @@ use crate::{ReadOnly, Writable, WriteOpenMode};
 pub(crate) struct StoreBase {
     file: File,
     spans: BTreeMap<u64, Span>,
-    logical_size: u64,
     file_size: u64,
 }
 
@@ -43,7 +42,6 @@ fn read_newfile(base: &mut StoreBase, compatible: fn(&header::HeaderVer) -> bool
                            record.hdr.logical_offset,
                            record.hdr.length,
                            record.file_data_offset, true);
-        base.logical_size = max(base.logical_size, record.hdr.logical_offset + record.hdr.length);
     }
     Ok(())
 }
@@ -69,7 +67,6 @@ pub fn open_readonly<P: AsRef<Path>>(
     let mut base = StoreBase {
         file: file,
         spans: BTreeMap::new(),
-        logical_size: 0,
         file_size: 0,
     };
 
@@ -106,7 +103,6 @@ pub fn open<P: AsRef<Path>>(
     let mut base = StoreBase {
         file: file,
         spans: BTreeMap::new(),
-        logical_size: 0,
         file_size: 0,
     };
 
@@ -144,7 +140,12 @@ impl<M> Store<M>
     ///
     /// Reading past this gives zeros.  Writing past this successfully is
     /// the only way to increase its value.
-    pub fn size(&self) -> u64 { self.base.logical_size }
+    pub fn size(&self) -> u64 {
+        self.base.spans
+            .last_key_value()
+            .map(|(off, span)| off + span.len)
+            .unwrap_or(0)
+    }
 
     /// Get offset of prior record (or 0)
     fn prev_offset(&self, offset: u64) -> u64 {
@@ -294,6 +295,7 @@ fn write_then_read() {
     let mut store = open(&path, WriteOpenMode::MayExist).unwrap();
 
     store.write(0, b"hello").unwrap();
+    assert_eq!(store.size(), 5);
 
     let mut buf = [0u8; 5];
     store.read(0, &mut buf).unwrap();

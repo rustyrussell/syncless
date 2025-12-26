@@ -74,20 +74,10 @@ pub fn open_readonly<P: AsRef<Path>>(
     Ok(Store {base, writable: false, _mode: PhantomData })
 }
 
-/// Opens an existing syncless store for reading and writing.
-///
-/// On success, the returned [`Store`] represents a logically consistent
-/// view reconstructed from the on-disk log.
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be opened for writing (using the
-/// underlying OS error), is not a valid syncless store, or is a
-/// future incompatible version.
-pub fn open<P: AsRef<Path>>(
+pub(crate) fn open_writable_base<P: AsRef<Path>>(
     path: P,
     mode: WriteOpenMode,
-) -> Result<Store<Writable>, Error> {
+) -> Result<StoreBase, Error> {
     let mut oo = std::fs::OpenOptions::new();
     oo.read(true);
     oo.write(true);
@@ -113,7 +103,27 @@ pub fn open<P: AsRef<Path>>(
     } else {
         read_newfile(&mut base, header::HeaderVer::is_write_compatible)?;
     }
-    Ok(Store {base, writable: true, _mode: PhantomData })
+    Ok(base)
+}
+
+
+/// Opens an existing syncless store for reading and writing.
+///
+/// On success, the returned [`Store`] represents a logically consistent
+/// view reconstructed from the on-disk log.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened for writing (using the
+/// underlying OS error), is not a valid syncless store, or is a
+/// future incompatible version.
+pub fn open<P: AsRef<Path>>(
+    path: P,
+    mode: WriteOpenMode,
+) -> Result<Store<Writable>, Error> {
+    Ok(Store {base: open_writable_base::<P>(path, mode)?,
+              writable: true,
+              _mode: PhantomData})
 }
 
 fn validate_record_with_retry(

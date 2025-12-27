@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Bound::*;
@@ -13,9 +13,19 @@ use crate::{ReadOnly, Writable, WriteOpenMode};
 
 /// An open Syncless store.
 pub(crate) struct StoreBase {
+    path: PathBuf,
     file: File,
     spans: BTreeMap<u64, Span>,
     file_size: u64,
+}
+
+impl StoreBase {
+    pub fn size(&self) -> u64 {
+        self.spans
+            .last_key_value()
+            .map(|(off, span)| off + span.len)
+            .unwrap_or(0)
+    }
 }
 
 pub(crate) struct Span {
@@ -59,12 +69,14 @@ fn read_newfile(base: &mut StoreBase, compatible: fn(&header::HeaderVer) -> bool
 pub fn open_readonly<P: AsRef<Path>>(
     path: P,
 ) -> Result<Store<ReadOnly>, Error> {
+    let path = path.as_ref().to_path_buf();
     let mut oo = std::fs::OpenOptions::new();
     oo.read(true);
 
-    let file = oo.open(path)?;
+    let file = oo.open(&path)?;
 
     let mut base = StoreBase {
+        path: path,
         file: file,
         spans: BTreeMap::new(),
         file_size: 0,
@@ -78,6 +90,7 @@ pub(crate) fn open_writable_base<P: AsRef<Path>>(
     path: P,
     mode: WriteOpenMode,
 ) -> Result<StoreBase, Error> {
+    let path = path.as_ref().to_path_buf();
     let mut oo = std::fs::OpenOptions::new();
     oo.read(true);
     oo.write(true);
@@ -88,9 +101,10 @@ pub(crate) fn open_writable_base<P: AsRef<Path>>(
         WriteOpenMode::MayExist => { oo.create(true); }
     }
 
-    let file = oo.open(path)?;
+    let file = oo.open(&path)?;
 
     let mut base = StoreBase {
+        path: path,
         file: file,
         spans: BTreeMap::new(),
         file_size: 0,
@@ -151,10 +165,7 @@ impl<M> Store<M>
     /// Reading past this gives zeros.  Writing past this successfully is
     /// the only way to increase its value.
     pub fn size(&self) -> u64 {
-        self.base.spans
-            .last_key_value()
-            .map(|(off, span)| off + span.len)
-            .unwrap_or(0)
+        self.base.size()
     }
 
     /// Get offset of prior record (or 0)
@@ -244,6 +255,42 @@ impl<M> Store<M>
     }
 }
 
+fn compact(base: &mut StoreBase) -> Result<StoreBase, Error> {
+    let path = base.path.clone();
+    let tmp = path.with_extension("compact");
+
+    // Fresh file: if we crashed before, overwrite.
+    let mut oo = std::fs::OpenOptions::new();
+    oo.write(true);
+    oo.create(true);
+    oo.truncate(true);
+
+    let mut file = oo.open(&tmp)?;
+    let mut file_len = header::write_header(&mut file)?;
+
+    // Suck up all the data.
+    let mut data = vec![0u8; base.size() as usize];
+    for (off, span) in &base.spans {
+        base.file.seek(SeekFrom::Start(span.file_data_offset))?;
+        base.file.read_exact(&mut data[*off as usize..(*off + span.len) as usize])?;
+    }
+
+    // Write it out, make sure it hit disk.
+    record::write_record(&mut file, 0, &data, &mut file_len)?;
+    file.sync_data()?;
+
+    // atomic replace
+    std::fs::rename(&tmp, &path)?;
+
+    // It's possible that the atomic replace is not actually atomic,
+    // but this is the best we can do.
+    let parent = path.parent().unwrap();
+    let dir = File::open(parent)?;
+    dir.sync_all()?;
+
+    // reopen into a fresh StoreBase
+    open_writable_base(&path, WriteOpenMode::MustExist)
+}    
 
 impl Store<Writable> {
     /// Writes `buf.len()` bytes starting at `offset`.
@@ -254,6 +301,9 @@ impl Store<Writable> {
     /// write may be lost on crash or power failure.  However, the
     /// effects of this write will never be observed without also
     /// observing the effects of all previous successful writes.
+    ///
+    /// This will rewrite the file (using fsync and rename) if it gets
+    /// more than 100x bigger than the contents.
     ///
     /// # Errors
     ///
@@ -270,6 +320,13 @@ impl Store<Writable> {
             buf = &buf[chunk.len()..];
             offset += chunk.len() as u64;
         }
+
+        // Compact when we're over 100x larger than we should be (unless we're tiny anyway)
+        if self.base.file_size > 1_000_000 && self.base.file_size * 100 > self.size() {
+            self.validate_range(0, self.size())?;
+            self.base = compact(&mut self.base)?;
+        }
+
         Ok(())
     }
 

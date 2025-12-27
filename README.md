@@ -4,8 +4,9 @@
 - individual writes are atomic
 - writes are observed in order
 - previously visible data is never corrupted
+- fsync is rarely used (only on creation, and when file gets too large)
 
-Recent writes may be lost on crash or power failure.
+Recent writes may be lost on OS crash or power failure.
 
 ## When to use this
 
